@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"rag_robot/internal/pkg/openai"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -44,8 +45,10 @@ func main() {
 		zap.String("mode", cfg.Server.Mode),
 		zap.String("port", cfg.Server.Port),
 	)
+	//初始化openAIClient
+	embeddingClient := openai.NewEmbeddingClient(cfg.OpenAI)
 
-	r := router.SetupRouter(db)
+	r := router.SetupRouter(db, embeddingClient)
 
 	addr := ":" + cfg.Server.Port
 	logger.Info("HTTP 服务启动", zap.String("addr", addr))

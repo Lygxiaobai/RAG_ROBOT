@@ -1,11 +1,12 @@
 package logger
 
 import (
+	"os"
+	"path/filepath"
+
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"
-	"os"
-	"path/filepath"
 )
 
 var Logger *zap.Logger
@@ -20,7 +21,7 @@ type Config struct {
 	MaxAge     int    //保留旧文件最大天数
 }
 
-// 初始化日志
+// Init 初始化日志
 func Init(cfg Config) error {
 	//1.设置日志级别
 	level := getLogLevel(cfg.Level)
@@ -76,7 +77,7 @@ func getEncoder(format string) zapcore.Encoder {
 	return zapcore.NewConsoleEncoder(encoderConfig)
 }
 
-// 获取日志的输出位置 ,并配置日志轮转
+// 获取日志的输出位置，并配置日志轮转
 func getWriteSyncer(cfg Config) (zapcore.WriteSyncer, error) {
 	// 如果没有配置文件路径，只输出到控制台
 	if cfg.OutputPath == "" {
@@ -105,22 +106,39 @@ func getWriteSyncer(cfg Config) (zapcore.WriteSyncer, error) {
 	), nil
 }
 
-// 全局日志函数 更加简洁
+// 全局日志函数，加 nil 守卫防止 Init 未调用时 panic
 func Info(msg string, fields ...zap.Field) {
+	if Logger == nil {
+		return
+	}
 	Logger.Info(msg, fields...)
 }
 
 func Warn(msg string, fields ...zap.Field) {
+	if Logger == nil {
+		return
+	}
 	Logger.Warn(msg, fields...)
 }
+
 func Error(msg string, fields ...zap.Field) {
+	if Logger == nil {
+		return
+	}
 	Logger.Error(msg, fields...)
 }
+
 func Debug(msg string, fields ...zap.Field) {
+	if Logger == nil {
+		return
+	}
 	Logger.Debug(msg, fields...)
 }
 
-// Sync刷新缓冲区 确保日志写到控制台和日志文件
+// Sync 刷新缓冲区，确保日志写到控制台和日志文件
 func Sync() error {
+	if Logger == nil {
+		return nil
+	}
 	return Logger.Sync()
 }
