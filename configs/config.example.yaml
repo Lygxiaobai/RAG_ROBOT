@@ -1,0 +1,29 @@
+server:
+  port: "8080"
+  mode: "release"
+
+database:
+  host: "localhost"
+  port: 3306
+  username: "root"
+  password: "YOUR_DB_PASSWORD"
+  dbname: "rag_robot"
+
+redis:
+  host: "localhost"
+  port: 6379
+  password: ""
+  db: 0
+
+openai:
+  api_key: "YOUR_OPENAI_API_KEY"
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-5.2"
+
+qdrant:
+  host: "localhost"
+  port: 6333
+
+log:
+  level: "info"
+  format: "text"
