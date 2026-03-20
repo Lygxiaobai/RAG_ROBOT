@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/md5"
 	"fmt"
+	"rag_robot/internal/repository/qdrant"
+
 	"io"
 	"os"
 	"path/filepath"
@@ -19,21 +21,24 @@ import (
 )
 
 type Service struct {
-	docRepo     *database.DocumentRepo
-	embedClient *openai.EmbeddingClient
-	chunker     *parser.Chunker
-	uploadDir   string // 文件上传保存目录
+	docRepo      *database.DocumentRepo
+	embedClient  *openai.EmbeddingClient
+	qdrantClient *qdrant.Client //将向量化数据插入到qdrant数据库中
+	chunker      *parser.Chunker
+	uploadDir    string // 文件上传保存目录
 }
 
 func NewService(
 	docRepo *database.DocumentRepo,
 	embedClient *openai.EmbeddingClient,
+	qdrantClient *qdrant.Client,
 ) *Service {
 	return &Service{
-		docRepo:     docRepo,
-		embedClient: embedClient,
-		chunker:     parser.NewChunker(500, 100),
-		uploadDir:   "uploads",
+		docRepo:      docRepo,
+		embedClient:  embedClient,
+		qdrantClient: qdrantClient,
+		chunker:      parser.NewChunker(500, 100),
+		uploadDir:    "uploads",
 	}
 }
 
@@ -89,17 +94,15 @@ func (s *Service) ProcessDocument(ctx context.Context, file io.Reader, fileName 
 	logger.Info("文档分块完成", zap.Int64("doc_id", docID), zap.Int("chunk_count", len(rawChunks)))
 
 	// 7. 批量向量化（每批最多50个）
-	chunkTexts := rawChunks
-	embeddings, err := s.batchEmbedding(ctx, chunkTexts)
+	embeddings, err := s.batchEmbedding(ctx, rawChunks)
 	if err != nil {
 		_ = s.docRepo.UpdateDocumentStatus(ctx, docID, "failed", 0)
 		return nil, fmt.Errorf("向量化失败: %w", err)
 	}
 
-	// 8. 构建分块记录（暂不写入 Qdrant，第三阶段实现）
+	// 8. 构建分块记录并批量写入 MySQL
 	var dbChunks []*model.DocumentChunk
 	for i, content := range rawChunks {
-		_ = embeddings[i] // 第三阶段写入 Qdrant 时会用到
 		dbChunks = append(dbChunks, &model.DocumentChunk{
 			DocumentID:      docID,
 			KnowledgeBaseID: kbID,
@@ -108,13 +111,32 @@ func (s *Service) ProcessDocument(ctx context.Context, file io.Reader, fileName 
 		})
 	}
 
-	// 9. 批量写入数据库
+	// 9. 批量写入数据库（获得每个 chunk 的自增 ID）
 	if err = s.docRepo.BatchCreateChunks(ctx, dbChunks); err != nil {
 		_ = s.docRepo.UpdateDocumentStatus(ctx, docID, "failed", 0)
 		return nil, fmt.Errorf("保存分块失败: %w", err)
 	}
 
-	// 10. 更新状态为 completed
+	// 10. 批量写入 Qdrant
+	qdrantPoints := make([]*qdrant.ChunkPoint, 0, len(dbChunks))
+	for i, chunk := range dbChunks {
+		pointID := uint64(docID)*100000 + uint64(i)
+		qdrantPoints = append(qdrantPoints, &qdrant.ChunkPoint{
+			ID:              pointID,
+			Vector:          embeddings[i],
+			DocumentID:      docID,
+			KnowledgeBaseID: kbID,
+			ChunkIndex:      i,
+			Content:         chunk.Content,
+		})
+	}
+	if err = s.qdrantClient.UpsertPoints(ctx, qdrantPoints); err != nil {
+		_ = s.docRepo.UpdateDocumentStatus(ctx, docID, "failed", 0)
+		return nil, fmt.Errorf("写入向量数据库失败: %w", err)
+	}
+	logger.Info("向量写入Qdrant完成", zap.Int64("doc_id", docID), zap.Int("point_count", len(qdrantPoints)))
+
+	// 11. 更新状态为 completed
 	_ = s.docRepo.UpdateDocumentStatus(ctx, docID, "completed", len(dbChunks))
 	logger.Info("文档处理完成", zap.Int64("doc_id", docID))
 

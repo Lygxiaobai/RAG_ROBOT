@@ -83,3 +83,10 @@ func (r *DocumentRepo) BatchCreateChunks(ctx context.Context, chunks []*model.Do
 
 	return tx.Commit()
 }
+
+// UpdateChunkQdrantID 回写 Qdrant Point ID 到分块记录
+func (r *DocumentRepo) UpdateChunkQdrantID(ctx context.Context, chunkID int64, qdrantPointID string) error {
+	query := `UPDATE document_chunks SET qdrant_point_id = ? WHERE id = ?`
+	_, err := r.db.ExecContext(ctx, query, qdrantPointID, chunkID)
+	return err
+}

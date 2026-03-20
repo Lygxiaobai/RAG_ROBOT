@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"rag_robot/internal/pkg/openai"
+	"rag_robot/internal/repository/qdrant"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -47,8 +48,18 @@ func main() {
 	)
 	//初始化openAIClient
 	embeddingClient := openai.NewEmbeddingClient(cfg.OpenAI)
+	logger.Info("初始化openAIClient 成功")
 
-	r := router.SetupRouter(db, embeddingClient)
+	//初始化qdrantClient
+	qdrantClient, err := qdrant.NewClient(cfg.Qdrant.Host, cfg.Qdrant.Port)
+	if err != nil {
+		logger.Error("qdrantClient初始化失败", zap.Error(err))
+		log.Fatal("qdrantClient初始化失败: ", err)
+	}
+	defer qdrantClient.Close()
+	logger.Info("初始化qdrantClient 成功")
+
+	r := router.SetupRouter(db, embeddingClient, qdrantClient)
 
 	addr := ":" + cfg.Server.Port
 	logger.Info("HTTP 服务启动", zap.String("addr", addr))
