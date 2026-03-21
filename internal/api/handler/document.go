@@ -62,3 +62,28 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 		"data":    result,
 	})
 }
+
+// Delete 处理文档删除请求
+func (h *DocumentHandler) Delete(c *gin.Context) {
+	docID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || docID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    400,
+			"message": "document id 无效",
+		})
+		return
+	}
+
+	if err = h.svc.DeleteDocument(c.Request.Context(), docID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    500,
+			"message": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    200,
+		"message": "success",
+	})
+}

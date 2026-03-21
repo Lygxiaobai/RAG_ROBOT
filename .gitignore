@@ -19,3 +19,13 @@ logs/
 *.log
 
 vendor/
+frontend/
+
+# test files
+*_test.go
+test/
+cmd/test_*/
+configs/*.test.local.yaml
+patch_test.txt
+test_search.sh
+

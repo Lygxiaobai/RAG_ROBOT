@@ -42,6 +42,15 @@ func (c *Chunker) Split(text string) []string {
 			continue
 		}
 
+		// 单个段落本身超过 ChunkSize，按字符强制切分后再处理
+		if len([]rune(para)) > c.ChunkSize {
+			subChunks := splitBySize(para, c.ChunkSize, c.ChunkOverlap)
+			for _, sub := range subChunks {
+				chunks = append(chunks, sub)
+			}
+			continue
+		}
+
 		// 如果当前块 + 新段落 超过限制，先保存当前块（用 rune 计数，正确处理中文）
 		if len([]rune(currentChunk.String()))+len([]rune(para)) > c.ChunkSize && currentChunk.Len() > 0 {
 			chunks = append(chunks, currentChunk.String())
@@ -78,4 +87,21 @@ func getOverlap(text string, n int) string {
 		return text
 	}
 	return string(runes[len(runes)-n:])
+}
+
+// splitBySize 对超长单段落按字符数强制切分（带重叠）
+func splitBySize(text string, size, overlap int) []string {
+	runes := []rune(text)
+	var chunks []string
+	for start := 0; start < len(runes); start += size - overlap {
+		end := start + size
+		if end > len(runes) {
+			end = len(runes)
+		}
+		chunks = append(chunks, string(runes[start:end]))
+		if end == len(runes) {
+			break
+		}
+	}
+	return chunks
 }

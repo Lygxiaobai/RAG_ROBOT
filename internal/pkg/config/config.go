@@ -42,9 +42,10 @@ type RedisConfig struct {
 }
 
 type OpenAIConfig struct {
-	APIKey  string `yaml:"api_key"`
-	BaseURL string `yaml:"base_url"`
-	Model   string `yaml:"model"`
+	APIKey         string `yaml:"api_key"`
+	BaseURL        string `yaml:"base_url"`
+	Model          string `yaml:"model"`
+	EmbeddingModel string `yaml:"embedding_model"`
 }
 
 type QdrantConfig struct {

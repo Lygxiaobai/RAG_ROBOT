@@ -11,17 +11,17 @@ import (
 
 const (
 	collectionName  = "rag_chunks"
-	vectorDimension = 1536 // OpenAI text-embedding-ada-002 维度
+	vectorDimension = 1536 // OpenAI text-embedding-ada-002
 )
 
-// Client Qdrant gRPC 客户端封装
+// Client Qdrant gRPC 客户端封装。
 type Client struct {
 	conn        *grpc.ClientConn
 	collections pb.CollectionsClient
 	points      pb.PointsClient
 }
 
-// NewClient 初始化并连接 Qdrant，确保 Collection 存在
+// NewClient 初始化并连接 Qdrant，确保 Collection 存在。
 func NewClient(host string, port int) (*Client, error) {
 	addr := fmt.Sprintf("%s:%d", host, port)
 	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -42,25 +42,23 @@ func NewClient(host string, port int) (*Client, error) {
 	return c, nil
 }
 
-// Close 关闭连接
+// Close 关闭连接。
 func (c *Client) Close() error {
 	return c.conn.Close()
 }
 
-// ensureCollection 如果 Collection 不存在则创建
+// ensureCollection 如不存在则创建默认集合。
 func (c *Client) ensureCollection(ctx context.Context) error {
-	// 先查询是否存在
 	resp, err := c.collections.List(ctx, &pb.ListCollectionsRequest{})
 	if err != nil {
 		return fmt.Errorf("查询 Qdrant Collections 失败: %w", err)
 	}
 	for _, col := range resp.Collections {
 		if col.Name == collectionName {
-			return nil // 已存在，无需创建
+			return nil
 		}
 	}
 
-	// 不存在，创建
 	distance := pb.Distance_Cosine
 	_, err = c.collections.Create(ctx, &pb.CreateCollection{
 		CollectionName: collectionName,
@@ -83,9 +81,10 @@ func (c *Client) ensureCollection(ctx context.Context) error {
 	return nil
 }
 
-// ChunkPoint 写入 Qdrant 的一个数据点
+// ChunkPoint 表示要写入 Qdrant 的一个分块向量点。
 type ChunkPoint struct {
-	ID              uint64 // 数字ID，由 docID*100000+chunkIndex 生成
+	ID              uint64
+	ChunkID         int64
 	Vector          []float32
 	DocumentID      int64
 	KnowledgeBaseID int64
@@ -93,7 +92,7 @@ type ChunkPoint struct {
 	Content         string
 }
 
-// UpsertPoints 批量写入向量点（存在则更新，不存在则插入）
+// UpsertPoints 批量写入向量点。
 func (c *Client) UpsertPoints(ctx context.Context, points []*ChunkPoint) error {
 	if len(points) == 0 {
 		return nil
@@ -102,15 +101,14 @@ func (c *Client) UpsertPoints(ctx context.Context, points []*ChunkPoint) error {
 	pbPoints := make([]*pb.PointStruct, 0, len(points))
 	for _, p := range points {
 		pbPoints = append(pbPoints, &pb.PointStruct{
-			Id: &pb.PointId{
-				PointIdOptions: &pb.PointId_Num{Num: p.ID},
-			},
+			Id: &pb.PointId{PointIdOptions: &pb.PointId_Num{Num: p.ID}},
 			Vectors: &pb.Vectors{
 				VectorsOptions: &pb.Vectors_Vector{
 					Vector: &pb.Vector{Data: p.Vector},
 				},
 			},
 			Payload: map[string]*pb.Value{
+				"chunk_id":          {Kind: &pb.Value_IntegerValue{IntegerValue: p.ChunkID}},
 				"document_id":       {Kind: &pb.Value_IntegerValue{IntegerValue: p.DocumentID}},
 				"knowledge_base_id": {Kind: &pb.Value_IntegerValue{IntegerValue: p.KnowledgeBaseID}},
 				"chunk_index":       {Kind: &pb.Value_IntegerValue{IntegerValue: int64(p.ChunkIndex)}},
@@ -131,9 +129,10 @@ func (c *Client) UpsertPoints(ctx context.Context, points []*ChunkPoint) error {
 	return nil
 }
 
-// SearchResult 检索结果
+// SearchResult 表示检索结果。
 type SearchResult struct {
 	PointID         string
+	ChunkID         int64
 	Score           float32
 	DocumentID      int64
 	KnowledgeBaseID int64
@@ -141,7 +140,7 @@ type SearchResult struct {
 	Content         string
 }
 
-// Search 余弦相似度 Top-K 检索，按 knowledge_base_id 过滤
+// Search 执行 Top-K 相似度检索，并按 knowledge_base_id 过滤。
 func (c *Client) Search(ctx context.Context, vector []float32, kbID int64, topK uint64) ([]*SearchResult, error) {
 	resp, err := c.points.Search(ctx, &pb.SearchPoints{
 		CollectionName: collectionName,
@@ -170,21 +169,22 @@ func (c *Client) Search(ctx context.Context, vector []float32, kbID int64, topK 
 	results := make([]*SearchResult, 0, len(resp.Result))
 	for _, hit := range resp.Result {
 		r := &SearchResult{
-			Score:   hit.Score,
-			Content: hit.Payload["content"].GetStringValue(),
+			ChunkID:         hit.Payload["chunk_id"].GetIntegerValue(),
+			Score:           hit.Score,
+			Content:         hit.Payload["content"].GetStringValue(),
+			DocumentID:      hit.Payload["document_id"].GetIntegerValue(),
+			KnowledgeBaseID: hit.Payload["knowledge_base_id"].GetIntegerValue(),
+			ChunkIndex:      int(hit.Payload["chunk_index"].GetIntegerValue()),
 		}
 		if id, ok := hit.Id.PointIdOptions.(*pb.PointId_Num); ok {
 			r.PointID = fmt.Sprintf("%d", id.Num)
 		}
-		r.DocumentID = hit.Payload["document_id"].GetIntegerValue()
-		r.KnowledgeBaseID = hit.Payload["knowledge_base_id"].GetIntegerValue()
-		r.ChunkIndex = int(hit.Payload["chunk_index"].GetIntegerValue())
 		results = append(results, r)
 	}
 	return results, nil
 }
 
-// DeleteByDocumentID 删除某个文档的所有向量点
+// DeleteByDocumentID 删除某个文档的所有向量点。
 func (c *Client) DeleteByDocumentID(ctx context.Context, documentID int64) error {
 	waitDelete := true
 	_, err := c.points.Delete(ctx, &pb.DeletePoints{

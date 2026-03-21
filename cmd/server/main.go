@@ -59,7 +59,11 @@ func main() {
 	defer qdrantClient.Close()
 	logger.Info("初始化qdrantClient 成功")
 
-	r := router.SetupRouter(db, embeddingClient, qdrantClient)
+	//初始化openAIClient
+	openAIClient := openai.NewChatClient(cfg.OpenAI)
+	logger.Info("openAIClient 成功")
+
+	r := router.SetupRouter(db, embeddingClient, qdrantClient, openAIClient)
 
 	addr := ":" + cfg.Server.Port
 	logger.Info("HTTP 服务启动", zap.String("addr", addr))
