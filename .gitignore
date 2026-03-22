@@ -28,4 +28,8 @@ cmd/test_*/
 configs/*.test.local.yaml
 patch_test.txt
 test_search.sh
+.claude
+.gocache
+.tmp
+.cache
 
