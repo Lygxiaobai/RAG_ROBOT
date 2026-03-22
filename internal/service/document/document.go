@@ -61,12 +61,57 @@ func (s *Service) ProcessDocument(ctx context.Context, file io.Reader, fileName 
 		FilePath:        filePath,
 		ContentHash:     contentHash,
 	}
-	docID, err := s.docRepo.CreateDocument(ctx, doc)
+
+	docID, created, err := s.docRepo.CreateDocument(ctx, doc)
 	if err != nil {
-		os.Remove(filePath)
+		_ = os.Remove(filePath)
 		return nil, fmt.Errorf("创建文档记录失败: %w", err)
 	}
 	doc.ID = docID
+
+	if !created {
+		// 命中 content_hash 去重：同一知识库中已存在相同内容的文档
+		// 策略：直接复用已有文档，保留历史问答记录和用户反馈
+		existingDoc, getErr := s.docRepo.GetDocumentByID(ctx, docID)
+		_ = os.Remove(filePath) // 删除新上传的文件（因为要复用旧的）
+		if getErr != nil {
+			return nil, fmt.Errorf("查询已存在文档失败: %w", getErr)
+		}
+		if existingDoc == nil {
+			return nil, fmt.Errorf("重复上传命中已存在文档，但未找到文档记录: %d", docID)
+		}
+
+		logger.Info("检测到重复上传，直接复用已有文档",
+			zap.Int64("doc_id", existingDoc.ID),
+			zap.Int64("knowledge_base_id", existingDoc.KnowledgeBaseID),
+			zap.String("status", existingDoc.Status),
+			zap.Int("chunk_count", existingDoc.ChunkCount))
+
+		// 如果旧文档处理失败，则重新处理
+		if existingDoc.Status == "failed" || existingDoc.Status == "processing" {
+			logger.Info("旧文档状态异常，尝试重新处理",
+				zap.Int64("doc_id", docID),
+				zap.String("old_status", existingDoc.Status))
+
+			// 删除旧的失败数据
+			if existingDoc.Status == "failed" {
+				_ = s.qdrantClient.DeleteByDocumentID(ctx, docID)
+				_ = s.docRepo.DeleteChunksByDocumentID(ctx, docID)
+			}
+
+			// 继续后续处理流程（不 return）
+		} else {
+			// 文档已完成处理，直接返回
+			return &model.UploadDocumentResponse{
+				DocumentID: existingDoc.ID,
+				Name:       existingDoc.Name,
+				FileType:   existingDoc.FileType,
+				FileSize:   existingDoc.FileSize,
+				Status:     existingDoc.Status,
+				ChunkCount: existingDoc.ChunkCount,
+			}, nil
+		}
+	}
 
 	_ = s.docRepo.UpdateDocumentStatus(ctx, docID, "processing", 0)
 
@@ -83,7 +128,20 @@ func (s *Service) ProcessDocument(ctx context.Context, file io.Reader, fileName 
 	logger.Info("文档解析完成", zap.Int64("doc_id", docID), zap.Int("text_length", len(text)))
 
 	rawChunks := s.chunker.Split(text)
-	logger.Info("文档分块完成", zap.Int64("doc_id", docID), zap.Int("chunk_count", len(rawChunks)))
+	logger.Info("文档分块完成",
+		zap.Int64("doc_id", docID),
+		zap.Int("chunk_count", len(rawChunks)),
+		zap.Int("text_length", len([]rune(text))),
+		zap.Int("avg_chunk_size", func() int {
+			if len(rawChunks) == 0 {
+				return 0
+			}
+			total := 0
+			for _, c := range rawChunks {
+				total += len([]rune(c))
+			}
+			return total / len(rawChunks)
+		}()))
 
 	embeddings, err := s.batchEmbedding(ctx, rawChunks)
 	if err != nil {
@@ -108,6 +166,7 @@ func (s *Service) ProcessDocument(ctx context.Context, file io.Reader, fileName 
 
 	qdrantPoints := make([]*qdrant.ChunkPoint, 0, len(dbChunks))
 	for i, chunk := range dbChunks {
+		// pointID 继续沿用 document_id + chunk_index 的稳定组合，保证向量点幂等可覆盖。
 		pointID := uint64(docID)*100000 + uint64(i)
 		qdrantPoints = append(qdrantPoints, &qdrant.ChunkPoint{
 			ID:              pointID,
@@ -125,7 +184,7 @@ func (s *Service) ProcessDocument(ctx context.Context, file io.Reader, fileName 
 	}
 	logger.Info("向量写入 Qdrant 完成", zap.Int64("doc_id", docID), zap.Int("point_count", len(qdrantPoints)))
 
-	// 回写 qdrant_point_id 到 document_chunks
+	// 回写 qdrant_point_id 到 document_chunks，便于后续追踪分块和向量点的映射关系。
 	for _, p := range qdrantPoints {
 		pointID := fmt.Sprintf("%d", p.ID)
 		if err = s.docRepo.UpdateChunkQdrantID(ctx, p.ChunkID, pointID); err != nil {
@@ -188,7 +247,7 @@ func (s *Service) saveFile(file io.Reader, fileName string) (string, string, err
 	w := io.MultiWriter(dst, h)
 	if _, err = io.Copy(w, file); err != nil {
 		dst.Close()
-		os.Remove(filePath)
+		_ = os.Remove(filePath)
 		return "", "", err
 	}
 

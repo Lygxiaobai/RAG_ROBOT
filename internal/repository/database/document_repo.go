@@ -17,9 +17,9 @@ func NewDocumentRepo(db *sql.DB) *DocumentRepo {
 	return &DocumentRepo{db: db}
 }
 
-// CreateDocument 创建文档记录，返回新记录 ID。
-// 若 content_hash 已存在（重复上传同一文件），直接返回已有记录的 ID。
-func (r *DocumentRepo) CreateDocument(ctx context.Context, doc *model.Document) (int64, error) {
+// CreateDocument 创建文档记录，返回文档 ID 和是否为新建记录。
+// 若 content_hash 已存在（重复上传同一文件），返回已有记录的 ID，并将 created 置为 false。
+func (r *DocumentRepo) CreateDocument(ctx context.Context, doc *model.Document) (int64, bool, error) {
 	query := `
           INSERT INTO documents (knowledge_base_id, name, file_type, file_size, file_path, status, content_hash, created_at, updated_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -36,18 +36,37 @@ func (r *DocumentRepo) CreateDocument(ctx context.Context, doc *model.Document) 
 		now, now,
 	)
 	if err != nil {
-		// 唯一键冲突（同一文件重复上传），查已有记录返回其 ID
 		if isUniqueViolation(err) {
+			// 同知识库下重复上传相同内容时，直接复用已有文档记录。
 			var existID int64
 			row := r.db.QueryRowContext(ctx,
-				`SELECT id FROM documents WHERE content_hash = ? LIMIT 1`, doc.ContentHash)
+				`SELECT id FROM documents WHERE knowledge_base_id = ? AND content_hash = ? LIMIT 1`,
+				doc.KnowledgeBaseID,
+				doc.ContentHash,
+			)
 			if scanErr := row.Scan(&existID); scanErr == nil {
-				return existID, nil
+				return existID, false, nil
+			}
+
+			// 兼容当前旧索引仍是全局 content_hash 唯一的情况，给出更明确的报错。
+			var existingKBID int64
+			row = r.db.QueryRowContext(ctx,
+				`SELECT knowledge_base_id FROM documents WHERE content_hash = ? LIMIT 1`,
+				doc.ContentHash,
+			)
+			if scanErr := row.Scan(&existingKBID); scanErr == nil {
+				return 0, false, fmt.Errorf("相同内容的文档已存在于知识库 %d，请先调整 documents 唯一索引为 (knowledge_base_id, content_hash)", existingKBID)
 			}
 		}
-		return 0, fmt.Errorf("创建文档记录失败: %w", err)
+		return 0, false, fmt.Errorf("创建文档记录失败: %w", err)
 	}
-	return result.LastInsertId()
+
+	// 走到这里说明本次是新建文档记录，需要把自增 ID 返回给上层继续处理。
+	id, idErr := result.LastInsertId()
+	if idErr != nil {
+		return 0, false, fmt.Errorf("获取文档 ID 失败: %w", idErr)
+	}
+	return id, true, nil
 }
 
 // isUniqueViolation 判断是否为 MySQL 唯一键冲突错误（Error 1062）。
@@ -109,7 +128,7 @@ func (r *DocumentRepo) BatchCreateChunks(ctx context.Context, chunks []*model.Do
 	return tx.Commit()
 }
 
-// UpdateChunkQdrantID 回写 Qdrant Point ID 到分块记录。  为了防止Qdrant中没有chunkkIndex
+// UpdateChunkQdrantID 回写 Qdrant Point ID 到分块记录。
 func (r *DocumentRepo) UpdateChunkQdrantID(ctx context.Context, chunkID int64, qdrantPointID string) error {
 	query := `UPDATE document_chunks SET qdrant_point_id = ? WHERE id = ?`
 	_, err := r.db.ExecContext(ctx, query, qdrantPointID, chunkID)
@@ -180,4 +199,14 @@ func (r *DocumentRepo) DeleteDocument(ctx context.Context, id int64) error {
 		return fmt.Errorf("删除文档失败: %w", err)
 	}
 	return tx.Commit()
+}
+
+// DeleteChunksByDocumentID 删除指定文档的所有分块（用于重新处理文档）
+func (r *DocumentRepo) DeleteChunksByDocumentID(ctx context.Context, documentID int64) error {
+	query := `DELETE FROM document_chunks WHERE document_id = ?`
+	_, err := r.db.ExecContext(ctx, query, documentID)
+	if err != nil {
+		return fmt.Errorf("删除文档分块失败: %w", err)
+	}
+	return nil
 }

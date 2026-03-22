@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS documents (
   updated_at       DATETIME         NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   deleted_at       DATETIME         DEFAULT NULL                   COMMENT '软删除时间',
   PRIMARY KEY (id),
-  UNIQUE  KEY uk_documents_content_hash  (content_hash),
+  UNIQUE  KEY uk_documents_kb_hash       (knowledge_base_id, content_hash),
   KEY             idx_documents_kb_id    (knowledge_base_id),
   KEY             idx_documents_status   (status),
   KEY             idx_documents_deleted_at (deleted_at)
