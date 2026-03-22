@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"rag_robot/internal/pkg/pool"
 	"strings"
 	"time"
 
@@ -25,12 +26,14 @@ type Service struct {
 	qdrantClient *qdrant.Client
 	chunker      *parser.Chunker
 	uploadDir    string
+	workPool     *pool.WorkerPool
 }
 
 func NewService(
 	docRepo *database.DocumentRepo,
 	embedClient *openai.EmbeddingClient,
 	qdrantClient *qdrant.Client,
+	workPool *pool.WorkerPool,
 ) *Service {
 	return &Service{
 		docRepo:      docRepo,
@@ -38,6 +41,7 @@ func NewService(
 		qdrantClient: qdrantClient,
 		chunker:      parser.NewChunker(500, 100),
 		uploadDir:    "uploads",
+		workPool:     workPool,
 	}
 }
 

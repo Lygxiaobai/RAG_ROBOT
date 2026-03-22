@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"rag_robot/internal/pkg/circuitbreaker"
 	"rag_robot/internal/pkg/config"
 )
 
@@ -19,6 +20,7 @@ type EmbeddingClient struct {
 	baseURL    string
 	apiKey     string
 	model      string
+	breaker    *circuitbreaker.CircuitBreaker
 }
 
 // NewEmbeddingClient 创建向量化客户端
@@ -41,6 +43,12 @@ func NewEmbeddingClient(cfg config.OpenAIConfig) *EmbeddingClient {
 	}
 }
 
+// WithBreaker 挂载熔断器，返回自身方便链式调用。
+func (e *EmbeddingClient) WithBreaker(cb *circuitbreaker.CircuitBreaker) *EmbeddingClient {
+	e.breaker = cb
+	return e
+}
+
 // embeddingRequest 发给 API 的请求体（input 用 any，可以是字符串或数组）
 type embeddingRequest struct {
 	Model string `json:"model"`
@@ -59,50 +67,62 @@ type embeddingResponse struct {
 }
 
 // GetEmbedding 对单个文本生成向量，input 发送为字符串（兼容千问 text-embedding-v2）
-// 原来用 go-openai SDK 发请求，SDK 把 input 序列化成数组 ["文本"]，千问 v2 只接受字符串 "文本"，所以报400。
-//
-//	改为直接 HTTP 请求，input 字段用 any 类型发字符串。
 func (e *EmbeddingClient) GetEmbedding(ctx context.Context, text string) ([]float32, error) {
-	body, err := json.Marshal(embeddingRequest{
-		Model: e.model,
-		Input: text, // 字符串，不是数组
-	})
-	if err != nil {
-		return nil, fmt.Errorf("序列化请求失败: %w", err)
+	var vec []float32
+	call := func() error {
+		body, err := json.Marshal(embeddingRequest{
+			Model: e.model,
+			Input: text,
+		})
+		if err != nil {
+			return fmt.Errorf("序列化请求失败: %w", err)
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			e.baseURL+"/embeddings", bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("创建请求失败: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+e.apiKey)
+
+		resp, err := e.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("调用Embeddings API失败: %w", err)
+		}
+		defer resp.Body.Close()
+
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("读取响应失败: %w", err)
+		}
+
+		var result embeddingResponse
+		if err = json.Unmarshal(data, &result); err != nil {
+			return fmt.Errorf("解析响应失败: %w, body=%s", err, string(data))
+		}
+
+		if result.Error != nil {
+			return fmt.Errorf("Embeddings API 返回错误: %s (code=%s)", result.Error.Message, result.Error.Code)
+		}
+		if len(result.Data) == 0 {
+			return fmt.Errorf("Embeddings API 返回空数据, body=%s", string(data))
+		}
+
+		vec = result.Data[0].Embedding
+		return nil
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		e.baseURL+"/embeddings", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("创建请求失败: %w", err)
+	if e.breaker != nil {
+		if err := e.breaker.Call(call); err != nil {
+			return nil, err
+		}
+		return vec, nil
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+e.apiKey)
-
-	resp, err := e.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("调用Embeddings API失败: %w", err)
+	if err := call(); err != nil {
+		return nil, err
 	}
-	defer resp.Body.Close()
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("读取响应失败: %w", err)
-	}
-
-	var result embeddingResponse
-	if err = json.Unmarshal(data, &result); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w, body=%s", err, string(data))
-	}
-
-	if result.Error != nil {
-		return nil, fmt.Errorf("Embeddings API 返回错误: %s (code=%s)", result.Error.Message, result.Error.Code)
-	}
-
-	if len(result.Data) == 0 {
-		return nil, fmt.Errorf("Embeddings API 返回空数据, body=%s", string(data))
-	}
-	return result.Data[0].Embedding, nil
+	return vec, nil
 }
 
 // GetEmbeddingBatch 批量生成向量，逐条调用兼容千问等不支持数组批量输入的接口。

@@ -28,8 +28,8 @@ func (h *QAHandler) Ask(c *gin.Context) {
 		return
 	}
 
-	//单次会话
-	resp, err := h.svc.Ask(c.Request.Context(), &qa.AskRequest{
+	//单次会话 使用Cache
+	resp, err := h.svc.AskQuestion(c.Request.Context(), &qa.AskRequest{
 		Question:        req.Question,
 		KnowledgeBaseID: req.KnowledgeBaseID,
 		TopK:            req.TopK,

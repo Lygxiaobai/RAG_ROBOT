@@ -4,14 +4,19 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"rag_robot/internal/model"
+	"rag_robot/internal/repository/cache"
 	"strings"
 	"time"
 
+	"github.com/jinzhu/copier"
 	goOpenAI "github.com/sashabaranov/go-openai"
 	"go.uber.org/zap"
 	"rag_robot/internal/pkg/logger"
 	"rag_robot/internal/pkg/openai"
+	"rag_robot/internal/pkg/pool"
 	"rag_robot/internal/repository/database"
 	"rag_robot/internal/service/search"
 )
@@ -40,13 +45,17 @@ type Service struct {
 	searchSvc  *search.Service
 	chatClient *openai.ChatClient
 	qaRepo     *database.QARepo
+	qaCache    *cache.QACache
+	pool       *pool.WorkerPool
 }
 
-func NewService(searchSvc *search.Service, chatClient *openai.ChatClient, qaRepo *database.QARepo) *Service {
+func NewService(searchSvc *search.Service, chatClient *openai.ChatClient, qaRepo *database.QARepo, qaCache *cache.QACache, workerPool *pool.WorkerPool) *Service {
 	return &Service{
 		searchSvc:  searchSvc,
 		chatClient: chatClient,
 		qaRepo:     qaRepo,
+		qaCache:    qaCache,
+		pool:       workerPool,
 	}
 }
 
@@ -70,7 +79,7 @@ type SourceChunk struct {
 	Score      float32 `json:"score"`
 }
 
-// Ask 单轮 RAG 问答。
+// Ask 单轮 RAG 问答。  未使用缓存
 func (s *Service) Ask(ctx context.Context, req *AskRequest) (*AskResponse, error) {
 	startedAt := time.Now()
 	kbID := req.KnowledgeBaseID
@@ -78,8 +87,10 @@ func (s *Service) Ask(ctx context.Context, req *AskRequest) (*AskResponse, error
 
 	hits, err := s.searchSvc.Search(ctx, req.Question, req.KnowledgeBaseID, req.TopK)
 	if err != nil {
-		//入库
-		s.persistRecord(req.Question, &kbID, questionHash, "", nil, startedAt, "failed", err.Error())
+		question, kbIDCopy, hashCopy, startCopy, errMsg := req.Question, kbID, questionHash, startedAt, err.Error()
+		s.submitAsync(func() {
+			s.persistRecord(question, &kbIDCopy, hashCopy, "", nil, startCopy, "failed", errMsg)
+		})
 		return nil, fmt.Errorf("检索失败: %w", err)
 	}
 
@@ -96,15 +107,86 @@ func (s *Service) Ask(ctx context.Context, req *AskRequest) (*AskResponse, error
 
 	answer, err := s.chatClient.Complete(ctx, messages)
 	if err != nil {
-		//入库
-		s.persistRecord(req.Question, &kbID, questionHash, "", sources, startedAt, "failed", err.Error())
+		question, kbIDCopy, hashCopy, startCopy, errMsg := req.Question, kbID, questionHash, startedAt, err.Error()
+		s.submitAsync(func() {
+			s.persistRecord(question, &kbIDCopy, hashCopy, "", sources, startCopy, "failed", errMsg)
+		})
 		return nil, fmt.Errorf("GPT 调用失败: %w", err)
 	}
 
+	// success 路径保持同步：QARecordID 需要返回给调用方用于反馈提交
 	resp := &AskResponse{Answer: answer, Sources: sources}
-	//入库
 	resp.QARecordID = s.persistRecord(req.Question, &kbID, questionHash, resp.Answer, resp.Sources, startedAt, "success", "")
 	return resp, nil
+}
+
+// submitAsync 将函数投递到协程池异步执行；pool 未初始化时降级为 goroutine。
+func (s *Service) submitAsync(fn func()) {
+	if s.pool != nil {
+		_ = s.pool.Submit(func(_ context.Context) error {
+			fn()
+			return nil
+		})
+		return
+	}
+	go fn()
+}
+
+// QA 单论问答 使用缓存
+func (s *Service) AskQuestion(ctx context.Context, req *AskRequest) (*AskResponse, error) {
+	// 1. 尝试从缓存获取
+	if s.qaCache != nil {
+		cached, hit, err := s.qaCache.Get(ctx, req.KnowledgeBaseID, req.Question)
+		if err == nil && hit {
+			logger.Info("QA缓存命中", zap.String("question", req.Question))
+
+			// 如果 cached 是 model.QAResult，需要转换
+			var askResp AskResponse
+			if err := copier.Copy(&askResp, cached); err != nil {
+				logger.Warn("缓存数据转换失败", zap.Error(err))
+				// 转换失败时，不返回缓存，继续正常流程
+			} else {
+				return &askResp, nil
+			}
+		} else if err != nil {
+			// 缓存读取失败，记录但不影响主流程
+			logger.Warn("读取缓存失败", zap.Error(err))
+		}
+	}
+
+	// 2. 缓存未命中，执行正常流程
+	askResponse, err := s.Ask(ctx, req)
+	if err != nil {
+		logger.Error("回答失败", zap.Error(err))
+		return nil, err // 关键：出错时应该返回错误，而不是继续
+	}
+
+	// 防御性检查
+	if askResponse == nil {
+		logger.Error("回答结果为空")
+		return nil, errors.New("empty response")
+	}
+
+	// 3. 异步保存结果到缓存（避免阻塞主流程）
+	if s.qaCache != nil {
+		go func() {
+			// 使用新的 context，避免主流程取消影响缓存写入
+			cacheCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+
+			var result model.QAResult
+			if err := copier.Copy(&result, askResponse); err != nil {
+				logger.Warn("缓存数据转换失败", zap.Error(err))
+				// 转换失败时，不返回缓存，继续正常流程
+			}
+			// 直接缓存 AskResponse，避免类型转换
+			if err := s.qaCache.Set(cacheCtx, req.KnowledgeBaseID, req.Question, &result); err != nil {
+				logger.Warn("保存QA缓存失败", zap.Error(err))
+			}
+		}()
+	}
+
+	return askResponse, nil
 }
 
 // buildContext 把检索到的片段拼成上下文文本，并返回来源信息。
@@ -246,3 +328,5 @@ func (s *Service) SubmitFeedback(ctx context.Context, req *FeedbackRequest) erro
 		Comment:    commentPtr,
 	})
 }
+
+//QAresult --->AskResponse

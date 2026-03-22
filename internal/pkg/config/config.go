@@ -11,7 +11,7 @@ type Config struct {
 	Server   ServerConfig   `yaml:"server"`
 	Database DatabaseConfig `yaml:"database"`
 	Redis    RedisConfig    `yaml:"redis"`
-	OpenAI   OpenAIConfig   `yaml:"openai"`
+	OpenAI   OpenAIConfig   `yaml:"openai"` //现在是千问
 	Qdrant   QdrantConfig   `yaml:"qdrant"`
 	Log      LogConfig      `yaml:"log"`
 }
@@ -76,6 +76,7 @@ func LoadConfig(path string) (*Config, error) {
 	return &config, nil
 }
 
+// 获取配置文件路径
 func GetConfigPath() string {
 	env := os.Getenv("APP_ENV")
 	if env == "" {

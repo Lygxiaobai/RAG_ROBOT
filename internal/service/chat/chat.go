@@ -14,6 +14,7 @@ import (
 	"rag_robot/internal/model"
 	"rag_robot/internal/pkg/logger"
 	"rag_robot/internal/pkg/openai"
+	"rag_robot/internal/pkg/pool"
 	"rag_robot/internal/repository/database"
 	qaService "rag_robot/internal/service/qa"
 	"rag_robot/internal/service/search"
@@ -44,15 +45,17 @@ type Service struct {
 	chatClient *openai.ChatClient
 	qaRepo     *database.QARepo
 	convRepo   *database.ConversationRepo
+	pool       *pool.WorkerPool
 }
 
-func NewService(searchSvc *search.Service, chatClient *openai.ChatClient, qaRepo *database.QARepo, convRepo *database.ConversationRepo) *Service {
+func NewService(searchSvc *search.Service, chatClient *openai.ChatClient, qaRepo *database.QARepo, convRepo *database.ConversationRepo, workerPool *pool.WorkerPool) *Service {
 	return &Service{
 		sessions:   make(map[string]*Session),
 		searchSvc:  searchSvc,
 		chatClient: chatClient,
 		qaRepo:     qaRepo,
 		convRepo:   convRepo,
+		pool:       workerPool,
 	}
 }
 
@@ -145,8 +148,9 @@ func (s *Service) Chat(ctx context.Context, sessionID, userMsg string, onChunk f
 
 	session, err := s.getSession(ctx, sessionID)
 	if err != nil {
-		//入库
-		s.persistRecord(nil, nil, userMsg, questionHash, "", nil, startedAt, "failed", err.Error())
+		s.submitAsync(func() {
+			s.persistRecord(nil, nil, userMsg, questionHash, "", nil, startedAt, "failed", err.Error())
+		})
 		return err
 	}
 
@@ -154,8 +158,10 @@ func (s *Service) Chat(ctx context.Context, sessionID, userMsg string, onChunk f
 	conversationID := optionalInt64(session.ConversationID)
 	hits, err := s.searchSvc.Search(ctx, userMsg, kbID, 5)
 	if err != nil {
-		//入库
-		s.persistRecord(&kbID, conversationID, userMsg, questionHash, "", nil, startedAt, "failed", err.Error())
+		kbIDCopy, convIDCopy, msgCopy, hashCopy, startCopy, errMsg := kbID, conversationID, userMsg, questionHash, startedAt, err.Error()
+		s.submitAsync(func() {
+			s.persistRecord(&kbIDCopy, convIDCopy, msgCopy, hashCopy, "", nil, startCopy, "failed", errMsg)
+		})
 		return fmt.Errorf("检索失败: %w", err)
 	}
 
@@ -172,8 +178,10 @@ func (s *Service) Chat(ctx context.Context, sessionID, userMsg string, onChunk f
 		if fullAnswer.Len() > 0 {
 			status = "partial"
 		}
-		//入库
-		s.persistRecord(&kbID, conversationID, userMsg, questionHash, fullAnswer.String(), hits, startedAt, status, err.Error())
+		kbIDCopy, convIDCopy, msgCopy, hashCopy, ans, startCopy, st, errMsg := kbID, conversationID, userMsg, questionHash, fullAnswer.String(), startedAt, status, err.Error()
+		s.submitAsync(func() {
+			s.persistRecord(&kbIDCopy, convIDCopy, msgCopy, hashCopy, ans, hits, startCopy, st, errMsg)
+		})
 		return err
 	}
 
@@ -189,12 +197,26 @@ func (s *Service) Chat(ctx context.Context, sessionID, userMsg string, onChunk f
 	session.UpdatedAt = time.Now()
 	s.mu.Unlock()
 
-	// 持久化消息到数据库
-	s.persistMessages(session.ConversationID, userMsg, answerText)
-
-	//入库
-	s.persistRecord(&kbID, conversationID, userMsg, questionHash, answerText, hits, startedAt, "success", "")
+	// 异步持久化消息和 QA 记录，不阻塞 SSE 响应返回
+	convID, ans := session.ConversationID, answerText
+	kbIDCopy, convIDCopy, msgCopy, hashCopy, startCopy := kbID, conversationID, userMsg, questionHash, startedAt
+	s.submitAsync(func() {
+		s.persistMessages(convID, userMsg, ans)
+		s.persistRecord(&kbIDCopy, convIDCopy, msgCopy, hashCopy, ans, hits, startCopy, "success", "")
+	})
 	return nil
+}
+
+// submitAsync 将函数投递到协程池异步执行；pool 未初始化时降级为 goroutine。
+func (s *Service) submitAsync(fn func()) {
+	if s.pool != nil {
+		_ = s.pool.Submit(func(_ context.Context) error {
+			fn()
+			return nil
+		})
+		return
+	}
+	go fn()
 }
 
 // persistMessages 将用户消息和助手回答写入 messages 表，并更新会话最后提问时间。

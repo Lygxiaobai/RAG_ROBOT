@@ -40,7 +40,7 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 	}
 	defer file.Close()
 
-	// 3. 调用 Service 处理
+	//3. 调用 Service 处理
 	result, err := h.svc.ProcessDocument(
 		c.Request.Context(),
 		file,
@@ -48,6 +48,7 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 		header.Size,
 		kbID,
 	)
+
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":    500,
