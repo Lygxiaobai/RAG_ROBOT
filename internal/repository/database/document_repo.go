@@ -192,6 +192,12 @@ func (r *DocumentRepo) DeleteDocument(ctx context.Context, id int64) error {
 	}
 	defer tx.Rollback()
 
+	// 先删 qa_sources（引用了 document_chunks.id），否则外键约束报错
+	if _, err = tx.ExecContext(ctx,
+		`DELETE FROM qa_sources WHERE chunk_id IN (SELECT id FROM document_chunks WHERE document_id = ?)`, id,
+	); err != nil {
+		return fmt.Errorf("删除qa_sources失败: %w", err)
+	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM document_chunks WHERE document_id = ?`, id); err != nil {
 		return fmt.Errorf("删除分块失败: %w", err)
 	}
