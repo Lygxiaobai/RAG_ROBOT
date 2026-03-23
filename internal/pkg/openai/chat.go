@@ -6,8 +6,11 @@ import (
 	"io"
 
 	"github.com/sashabaranov/go-openai"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"rag_robot/internal/pkg/circuitbreaker"
 	"rag_robot/internal/pkg/config"
+	"rag_robot/internal/pkg/tracing"
 )
 
 type ChatClient struct {
@@ -43,6 +46,13 @@ func (c *ChatClient) WithBreaker(cb *circuitbreaker.CircuitBreaker) *ChatClient 
 
 // Complete 普通问答，返回完整答案字符串
 func (c *ChatClient) Complete(ctx context.Context, messages []openai.ChatCompletionMessage) (string, error) {
+	ctx, span := tracing.Tracer.Start(ctx, "chat.Complete")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("chat.model", c.model),
+		attribute.Int("chat.message_count", len(messages)),
+	)
+
 	var answer string
 	call := func() error {
 		resp, err := c.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
@@ -61,11 +71,15 @@ func (c *ChatClient) Complete(ctx context.Context, messages []openai.ChatComplet
 
 	if c.breaker != nil {
 		if err := c.breaker.Call(call); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return "", err
 		}
 		return answer, nil
 	}
 	if err := call(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return "", err
 	}
 	return answer, nil
@@ -74,6 +88,12 @@ func (c *ChatClient) Complete(ctx context.Context, messages []openai.ChatComplet
 // StreamComplete 流式问答，每生成一个 token 就调用一次 onChunk
 // onChunk 返回 error 可中断流
 func (c *ChatClient) StreamComplete(ctx context.Context, messages []openai.ChatCompletionMessage, onChunk func(string) error) error {
+	ctx, span := tracing.Tracer.Start(ctx, "chat.StreamComplete")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("chat.model", c.model),
+		attribute.Int("chat.message_count", len(messages)),
+	)
 	call := func() error {
 		stream, err := c.client.CreateChatCompletionStream(ctx, openai.ChatCompletionRequest{
 			Model:    c.model,
@@ -107,7 +127,17 @@ func (c *ChatClient) StreamComplete(ctx context.Context, messages []openai.ChatC
 	}
 
 	if c.breaker != nil {
-		return c.breaker.Call(call)
+		if err := c.breaker.Call(call); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return err
+		}
+		return nil
 	}
-	return call()
+	if err := call(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	return nil
 }

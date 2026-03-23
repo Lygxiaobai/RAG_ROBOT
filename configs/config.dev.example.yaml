@@ -1,6 +1,6 @@
 server:
   port: "8080"
-  mode: "debug"
+  mode: "debug"           # 开发环境用 debug
 
 database:
   host: "localhost"
@@ -10,29 +10,52 @@ database:
   dbname: "rag_robot"
   charset: "utf8mb4"
   maxOpenConns: 20
-  maxIdleConns: 10
+  maxIdleConns: 5
   connMaxLifetimeMinutes: 60
   connMaxIdleTimeMinutes: 30
 
 redis:
+  enabled: true
   host: "localhost"
   port: 6379
   password: ""
   db: 0
 
 openai:
-  api_key: "YOUR_OPENAI_API_KEY"
-  base_url: "https://api.openai.com/v1"
-  model: "gpt-5.2"
+  api_key: "YOUR_API_KEY"
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  model: "qwen-plus"
+  embedding_model: "text-embedding-v3"
 
 qdrant:
   host: "localhost"
-  port: 6333
+  port: 6334
 
 log:
   level: "debug"
-  format: "text"
+  format: "text"          # 开发环境 text 格式，终端可读性好
   outputPath: "logs/app.log"
   maxSize: 100
   maxBackups: 3
   maxAge: 7
+
+metrics:
+  enabled: true
+  path: "/metrics"
+
+tracing:
+  enabled: true
+  service_name: "rag-robot"
+  exporter: "stdout"      # 开发环境输出到 stderr，直接看控制台
+
+circuit_breaker:
+  openai:
+    window_size: "60s"
+    min_requests: 5
+    failure_rate: 0.5
+    reset_timeout: "30s"
+  qdrant:
+    window_size: "30s"
+    min_requests: 3
+    failure_rate: 0.6
+    reset_timeout: "15s"

@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 	"rag_robot/internal/model"
 	"rag_robot/internal/pkg/logger"
+	"rag_robot/internal/pkg/metrics"
 )
 
 // QACache 问答结果缓存
@@ -57,10 +58,12 @@ func (c *QACache) Get(ctx context.Context, kbID int64, question string) (*model.
 	val, err := c.cache.Get(ctx, key)
 	if err == redis.Nil {
 		// 缓存未命中
+		metrics.CacheHitsTotal.WithLabelValues("qa", "miss").Inc()
 		return nil, false, nil
 	}
 	if err != nil {
 		// Redis错误，不影响主流程
+		metrics.CacheHitsTotal.WithLabelValues("qa", "miss").Inc()
 		logger.Warn("获取QA缓存失败", zap.Error(err))
 		return nil, false, nil
 	}
@@ -71,9 +74,11 @@ func (c *QACache) Get(ctx context.Context, kbID int64, question string) (*model.
 		logger.Warn("反序列化QA缓存失败", zap.Error(err))
 		// 删除损坏的缓存
 		_ = c.cache.Del(ctx, key)
+		metrics.CacheHitsTotal.WithLabelValues("qa", "miss").Inc()
 		return nil, false, nil
 	}
 
+	metrics.CacheHitsTotal.WithLabelValues("qa", "hit").Inc()
 	logger.Debug("QA缓存命中", zap.String("key", key))
 	return &result, true, nil
 }

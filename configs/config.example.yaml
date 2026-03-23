@@ -1,6 +1,6 @@
 server:
   port: "8080"
-  mode: "release"
+  mode: "release"         # debug | release
 
 database:
   host: "localhost"
@@ -8,22 +8,54 @@ database:
   username: "root"
   password: "YOUR_DB_PASSWORD"
   dbname: "rag_robot"
+  charset: "utf8mb4"
+  maxOpenConns: 50                # 最大连接数
+  maxIdleConns: 10                # 最大空闲连接数
+  connMaxLifetimeMinutes: 30      # 连接最大存活时间（分钟）
+  connMaxIdleTimeMinutes: 10      # 连接最大空闲时间（分钟）
 
 redis:
+  enabled: true
   host: "localhost"
   port: 6379
   password: ""
   db: 0
 
 openai:
-  api_key: "YOUR_OPENAI_API_KEY"
-  base_url: "https://api.openai.com/v1"
-  model: "gpt-5.2"
+  api_key: "YOUR_API_KEY"
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  model: "qwen-plus"
+  embedding_model: "text-embedding-v3"
 
 qdrant:
   host: "localhost"
-  port: 6333
+  port: 6334              # gRPC 端口（HTTP REST 是 6333）
 
 log:
-  level: "info"
-  format: "text"
+  level: "info"           # debug | info | warn | error
+  format: "json"          # json（生产）| text（开发）
+  outputPath: "logs/app.log"
+  maxSize: 100            # 单个日志文件最大体积（MB）
+  maxBackups: 7           # 保留的历史日志文件数
+  maxAge: 30              # 历史日志最大保留天数
+
+metrics:
+  enabled: true
+  path: "/metrics"        # Prometheus 抓取路径
+
+tracing:
+  enabled: true
+  service_name: "rag-robot"
+  exporter: "stdout"      # stdout（开发）| jaeger（生产）
+
+circuit_breaker:
+  openai:
+    window_size: "60s"    # 滑动窗口时长
+    min_requests: 5       # 触发熔断判断的最小请求数
+    failure_rate: 0.5     # 失败率阈值，超过则熔断
+    reset_timeout: "30s"  # Open→HalfOpen 等待时长
+  qdrant:
+    window_size: "30s"
+    min_requests: 3
+    failure_rate: 0.6
+    reset_timeout: "15s"

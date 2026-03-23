@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"rag_robot/internal/model"
+	"rag_robot/internal/pkg/metrics"
 	"rag_robot/internal/repository/cache"
 	"strings"
 	"time"
@@ -69,6 +70,8 @@ type AskResponse struct {
 	QARecordID int64         `json:"qa_record_id"`
 	Answer     string        `json:"answer"`
 	Sources    []SourceChunk `json:"sources"`
+	// IsFallback=true 表示本次回答为降级响应（OpenAI 不可用，直接返回检索原文）
+	IsFallback bool `json:"is_fallback,omitempty"`
 }
 
 type SourceChunk struct {
@@ -82,11 +85,15 @@ type SourceChunk struct {
 // Ask 单轮 RAG 问答。  未使用缓存
 func (s *Service) Ask(ctx context.Context, req *AskRequest) (*AskResponse, error) {
 	startedAt := time.Now()
+	// 记录整个问答流程的耗时，函数返回时自动执行
+	defer metrics.ObserveQADuration("qa", startedAt)
+
 	kbID := req.KnowledgeBaseID
 	questionHash := hashQuestion(req.Question)
 
 	hits, err := s.searchSvc.Search(ctx, req.Question, req.KnowledgeBaseID, req.TopK)
 	if err != nil {
+		metrics.QARequestsTotal.WithLabelValues("qa", "error").Inc()
 		question, kbIDCopy, hashCopy, startCopy, errMsg := req.Question, kbID, questionHash, startedAt, err.Error()
 		s.submitAsync(func() {
 			s.persistRecord(question, &kbIDCopy, hashCopy, "", nil, startCopy, "failed", errMsg)
@@ -95,6 +102,21 @@ func (s *Service) Ask(ctx context.Context, req *AskRequest) (*AskResponse, error
 	}
 
 	ragContext, sources := buildContext(hits)
+
+	// 无相关文档时，直接返回提示，无需调用 OpenAI
+	if len(hits) == 0 {
+		metrics.QARequestsTotal.WithLabelValues("qa", "fallback").Inc()
+		resp := &AskResponse{
+			Answer:     "根据现有文档，未找到与您问题相关的内容。",
+			Sources:    sources,
+			IsFallback: true,
+		}
+		question, kbIDCopy, hashCopy, startCopy := req.Question, kbID, questionHash, startedAt
+		s.submitAsync(func() {
+			s.persistRecord(question, &kbIDCopy, hashCopy, resp.Answer, nil, startCopy, "success", "")
+		})
+		return resp, nil
+	}
 
 	messages := []goOpenAI.ChatCompletionMessage{
 		{Role: goOpenAI.ChatMessageRoleSystem, Content: systemPrompt},
@@ -107,12 +129,29 @@ func (s *Service) Ask(ctx context.Context, req *AskRequest) (*AskResponse, error
 
 	answer, err := s.chatClient.Complete(ctx, messages)
 	if err != nil {
+		// OpenAI 调用失败，降级：将检索到的原文片段拼接成答案返回
+		//OpenAI调用失败记录到prometheus
+		metrics.OpenAICallsTotal.WithLabelValues("chat", "error").Inc()
+		metrics.QARequestsTotal.WithLabelValues("qa", "fallback").Inc()
+		logger.Warn("OpenAI 调用失败，降级返回检索原文",
+			zap.Error(err),
+			zap.String("question", req.Question),
+		)
+		fallbackAnswer := buildFallbackAnswer(sources)
+		resp := &AskResponse{
+			Answer:     fallbackAnswer,
+			Sources:    sources,
+			IsFallback: true,
+		}
 		question, kbIDCopy, hashCopy, startCopy, errMsg := req.Question, kbID, questionHash, startedAt, err.Error()
 		s.submitAsync(func() {
-			s.persistRecord(question, &kbIDCopy, hashCopy, "", sources, startCopy, "failed", errMsg)
+			s.persistRecord(question, &kbIDCopy, hashCopy, fallbackAnswer, sources, startCopy, "fallback", errMsg)
 		})
-		return nil, fmt.Errorf("GPT 调用失败: %w", err)
+		return resp, nil
 	}
+
+	metrics.OpenAICallsTotal.WithLabelValues("chat", "success").Inc()
+	metrics.QARequestsTotal.WithLabelValues("qa", "success").Inc()
 
 	// success 路径保持同步：QARecordID 需要返回给调用方用于反馈提交
 	resp := &AskResponse{Answer: answer, Sources: sources}
@@ -307,6 +346,21 @@ func topScoreFromSources(sources []SourceChunk) *float64 {
 func hashQuestion(question string) string {
 	sum := sha256.Sum256([]byte(question))
 	return hex.EncodeToString(sum[:])
+}
+
+// buildFallbackAnswer 当 OpenAI 不可用时，将检索到的文档片段拼接成降级答案。
+// 最多取前 3 个片段，并在开头加上降级说明，让用户知道这不是 AI 生成的答案。
+func buildFallbackAnswer(sources []SourceChunk) string {
+	var sb strings.Builder
+	sb.WriteString("（当前 AI 服务暂时不可用，以下为原文检索结果，供参考）\n\n")
+	limit := 3
+	if len(sources) < limit {
+		limit = len(sources)
+	}
+	for i := 0; i < limit; i++ {
+		sb.WriteString(fmt.Sprintf("【相关内容 %d】\n%s\n\n", i+1, sources[i].Content))
+	}
+	return sb.String()
 }
 
 // FeedbackRequest 用户反馈请求。

@@ -210,3 +210,44 @@ func (r *DocumentRepo) DeleteChunksByDocumentID(ctx context.Context, documentID 
 	}
 	return nil
 }
+
+// FullTextSearchChunk 是全文检索返回的分块结构，与 SearchResult 字段对应。
+type FullTextSearchChunk struct {
+	ID         int64
+	DocumentID int64
+	ChunkIndex int
+	Content    string
+}
+
+// FullTextSearch 对 document_chunks 表按 content LIKE 做全文检索兜底。
+// 仅在 Qdrant 不可用时作为降级方案使用。
+// 按 content_length 升序（内容越短越精准），最多返回 limit 条。
+func (r *DocumentRepo) FullTextSearch(ctx context.Context, kbID int64, query string, limit int) ([]*FullTextSearchChunk, error) {
+	// LIKE 检索：%keyword%，简单有效，无需额外索引
+	// kbID 过滤保证只检索当前知识库的内容
+	sql := `
+		SELECT id, document_id, chunk_index, content
+		FROM document_chunks
+		WHERE knowledge_base_id = ?
+		  AND content LIKE ?
+		ORDER BY content_length ASC
+		LIMIT ?
+	`
+	// 构造 LIKE 参数，关键词两侧加 %
+	keyword := "%" + query + "%"
+	rows, err := r.db.QueryContext(ctx, sql, kbID, keyword, limit)
+	if err != nil {
+		return nil, fmt.Errorf("全文检索失败: %w", err)
+	}
+	defer rows.Close()
+
+	var results []*FullTextSearchChunk
+	for rows.Next() {
+		chunk := &FullTextSearchChunk{}
+		if err := rows.Scan(&chunk.ID, &chunk.DocumentID, &chunk.ChunkIndex, &chunk.Content); err != nil {
+			return nil, fmt.Errorf("扫描检索结果失败: %w", err)
+		}
+		results = append(results, chunk)
+	}
+	return results, rows.Err()
+}

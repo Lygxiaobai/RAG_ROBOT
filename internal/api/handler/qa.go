@@ -1,9 +1,8 @@
 package handler
 
 import (
-	"net/http"
-
 	"github.com/gin-gonic/gin"
+	"rag_robot/internal/pkg/errors"
 	"rag_robot/internal/service/qa"
 )
 
@@ -24,22 +23,22 @@ type askRequest struct {
 func (h *QAHandler) Ask(c *gin.Context) {
 	var req askRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "参数错误: " + err.Error()})
+		Fail(c, errors.ErrInvalidParam.Wrap(err))
 		return
 	}
 
-	//单次会话 使用Cache
+	// 单次问答，使用 Cache
 	resp, err := h.svc.AskQuestion(c.Request.Context(), &qa.AskRequest{
 		Question:        req.Question,
 		KnowledgeBaseID: req.KnowledgeBaseID,
 		TopK:            req.TopK,
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+		Fail(c, err)
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "success", "data": resp})
+	Success(c, resp)
 }
 
 type feedbackRequest struct {
@@ -51,7 +50,7 @@ type feedbackRequest struct {
 func (h *QAHandler) Feedback(c *gin.Context) {
 	var req feedbackRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "参数错误: " + err.Error()})
+		Fail(c, errors.ErrInvalidParam.Wrap(err))
 		return
 	}
 
@@ -60,9 +59,9 @@ func (h *QAHandler) Feedback(c *gin.Context) {
 		Rating:     req.Rating,
 		Comment:    req.Comment,
 	}); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+		Fail(c, err)
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "success"})
+	Success(c, nil)
 }

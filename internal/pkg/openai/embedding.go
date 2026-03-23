@@ -10,8 +10,11 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"rag_robot/internal/pkg/circuitbreaker"
 	"rag_robot/internal/pkg/config"
+	"rag_robot/internal/pkg/tracing"
 )
 
 // EmbeddingClient 向量化客户端（直接 HTTP，兼容千问 text-embedding-v2 只接受字符串 input）
@@ -68,6 +71,14 @@ type embeddingResponse struct {
 
 // GetEmbedding 对单个文本生成向量，input 发送为字符串（兼容千问 text-embedding-v2）
 func (e *EmbeddingClient) GetEmbedding(ctx context.Context, text string) ([]float32, error) {
+	// Span 覆盖整个 embedding 调用（含熔断器判断 + HTTP 往返）
+	ctx, span := tracing.Tracer.Start(ctx, "embedding.GetEmbedding")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("embedding.model", e.model),
+		attribute.Int("embedding.text_length", len(text)),
+	)
+
 	var vec []float32
 	call := func() error {
 		body, err := json.Marshal(embeddingRequest{
@@ -115,11 +126,15 @@ func (e *EmbeddingClient) GetEmbedding(ctx context.Context, text string) ([]floa
 
 	if e.breaker != nil {
 		if err := e.breaker.Call(call); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return nil, err
 		}
 		return vec, nil
 	}
 	if err := call(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 	return vec, nil

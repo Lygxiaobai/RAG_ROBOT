@@ -7,6 +7,7 @@ import (
 
 	"go.uber.org/zap"
 	"rag_robot/internal/pkg/logger"
+	"rag_robot/internal/pkg/metrics"
 )
 
 // Task 任务接口
@@ -101,6 +102,8 @@ func (p *WorkerPool) worker(id int) {
 func (p *WorkerPool) Submit(task Task) error {
 	select {
 	case p.taskQueue <- task:
+		// 任务入队后，更新当前队列积压数量到 Prometheus
+		metrics.WorkerPoolQueueSize.Set(float64(len(p.taskQueue)))
 		return nil
 	default:
 		// 任务队列已满

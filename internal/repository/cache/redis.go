@@ -17,7 +17,7 @@ type Client struct {
 	rdb       *redis.Client
 	hitCount  int64 // 缓存命中次数
 	missCount int64 // 缓存未命中次数
-	enabled   bool  // 是否启用缓存（降级开关）
+	Enabled   bool  // 是否启用缓存（降级开关）
 }
 
 // NewClient 创建Redis客户端
@@ -52,13 +52,13 @@ func NewClient(cfg config.RedisConfig) (*Client, error) {
 		// Redis连接失败，启用降级模式（禁用缓存）
 		return &Client{
 			rdb:     nil,
-			enabled: false,
+			Enabled: false,
 		}, nil // 不返回错误，允许系统继续运行
 	}
 
 	return &Client{
 		rdb:     rdb,
-		enabled: true,
+		Enabled: true,
 	}, nil
 }
 
@@ -72,7 +72,7 @@ func NewClient(cfg config.RedisConfig) (*Client, error) {
 // 返回：
 //   - error: 错误信息
 func (c *Client) Set(ctx context.Context, key string, value interface{}, ttl time.Duration) error {
-	if !c.enabled || c.rdb == nil {
+	if !c.Enabled || c.rdb == nil {
 		return nil // 缓存未启用，直接返回
 	}
 
@@ -88,7 +88,7 @@ func (c *Client) Set(ctx context.Context, key string, value interface{}, ttl tim
 //   - string: 缓存值
 //   - error: 错误信息（redis.Nil 表示键不存在）
 func (c *Client) Get(ctx context.Context, key string) (string, error) {
-	if !c.enabled || c.rdb == nil {
+	if !c.Enabled || c.rdb == nil {
 		return "", redis.Nil // 缓存未启用，返回未命中
 	}
 
@@ -107,7 +107,7 @@ func (c *Client) Get(ctx context.Context, key string) (string, error) {
 
 // Del 删除缓存
 func (c *Client) Del(ctx context.Context, keys ...string) error {
-	if !c.enabled || c.rdb == nil {
+	if !c.Enabled || c.rdb == nil {
 		return nil
 	}
 
@@ -116,7 +116,7 @@ func (c *Client) Del(ctx context.Context, keys ...string) error {
 
 // Exists 检查键是否存在
 func (c *Client) Exists(ctx context.Context, key string) (bool, error) {
-	if !c.enabled || c.rdb == nil {
+	if !c.Enabled || c.rdb == nil {
 		return false, nil
 	}
 
@@ -126,7 +126,7 @@ func (c *Client) Exists(ctx context.Context, key string) (bool, error) {
 
 // Expire 设置过期时间
 func (c *Client) Expire(ctx context.Context, key string, ttl time.Duration) error {
-	if !c.enabled || c.rdb == nil {
+	if !c.Enabled || c.rdb == nil {
 		return nil
 	}
 
@@ -142,10 +142,23 @@ func (c *Client) GetHitRate() float64 {
 	return float64(c.hitCount) / float64(total)
 }
 
+// Ping 检查 Redis 是否可达，用于健康检查。
+func (c *Client) Ping(ctx context.Context) error {
+	if !c.Enabled || c.rdb == nil {
+		return fmt.Errorf("redis 未启用")
+	}
+	return c.rdb.Ping(ctx).Err()
+}
+
 // Close 关闭Redis连接
 func (c *Client) Close() error {
 	if c.rdb == nil {
 		return nil
 	}
 	return c.rdb.Close()
+}
+
+// 设置Redis开启
+func (c *Client) IsEnabled(enabled bool) {
+	c.Enabled = enabled
 }

@@ -8,12 +8,15 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Database DatabaseConfig `yaml:"database"`
-	Redis    RedisConfig    `yaml:"redis"`
-	OpenAI   OpenAIConfig   `yaml:"openai"` //现在是千问
-	Qdrant   QdrantConfig   `yaml:"qdrant"`
-	Log      LogConfig      `yaml:"log"`
+	Server         ServerConfig         `yaml:"server"`
+	Database       DatabaseConfig       `yaml:"database"`
+	Redis          RedisConfig          `yaml:"redis"`
+	OpenAI         OpenAIConfig         `yaml:"openai"` // 现在是千问
+	Qdrant         QdrantConfig         `yaml:"qdrant"`
+	Log            LogConfig            `yaml:"log"`
+	Metrics        MetricsConfig        `yaml:"metrics"`
+	Tracing        TracingConfig        `yaml:"tracing"`
+	CircuitBreaker CircuitBreakerConfig `yaml:"circuit_breaker"`
 }
 
 type ServerConfig struct {
@@ -39,6 +42,7 @@ type RedisConfig struct {
 	Port     int    `yaml:"port"`
 	Password string `yaml:"password"`
 	DB       int    `yaml:"db"`
+	Enabled  bool   `yaml:"enabled"`
 }
 
 type OpenAIConfig struct {
@@ -60,6 +64,38 @@ type LogConfig struct {
 	MaxSize    int    `yaml:"maxSize"`
 	MaxBackups int    `yaml:"maxBackups"`
 	MaxAge     int    `yaml:"maxAge"`
+}
+
+// MetricsConfig Prometheus 监控配置
+type MetricsConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Path    string `yaml:"path"` // Prometheus 抓取路径，默认 /metrics
+}
+
+// TracingConfig OpenTelemetry 链路追踪配置
+type TracingConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	ServiceName string `yaml:"service_name"`
+	// Exporter 支持 stdout（开发调试）和 jaeger（生产上报）
+	Exporter string `yaml:"exporter"`
+}
+
+// CircuitBreakerConfig 各依赖服务的熔断器参数配置
+type CircuitBreakerConfig struct {
+	OpenAI CBItemConfig `yaml:"openai"`
+	Qdrant CBItemConfig `yaml:"qdrant"`
+}
+
+// CBItemConfig 单个熔断器参数
+type CBItemConfig struct {
+	// WindowSize 滑动窗口时长，例如 "60s"
+	WindowSize string `yaml:"window_size"`
+	// MinRequests 触发熔断判断的最小请求数
+	MinRequests uint32 `yaml:"min_requests"`
+	// FailureRate 失败率阈值（0~1），超过则打开熔断器
+	FailureRate float64 `yaml:"failure_rate"`
+	// ResetTimeout 熔断器 Open→HalfOpen 的等待时长，例如 "30s"
+	ResetTimeout string `yaml:"reset_timeout"`
 }
 
 func LoadConfig(path string) (*Config, error) {

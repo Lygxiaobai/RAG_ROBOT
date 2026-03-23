@@ -1,9 +1,8 @@
 package handler
 
 import (
-	"net/http"
-
 	"github.com/gin-gonic/gin"
+	"rag_robot/internal/pkg/errors"
 	"rag_robot/internal/service/search"
 )
 
@@ -25,25 +24,15 @@ type searchRequest struct {
 func (h *SearchHandler) Search(c *gin.Context) {
 	var req searchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code":    400,
-			"message": "参数错误: " + err.Error(),
-		})
+		Fail(c, errors.ErrInvalidParam.Wrap(err))
 		return
 	}
 
 	results, err := h.svc.Search(c.Request.Context(), req.Query, req.KnowledgeBaseID, req.TopK)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    500,
-			"message": err.Error(),
-		})
+		Fail(c, err)
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"code":    200,
-		"message": "success",
-		"data":    results,
-	})
+	Success(c, results)
 }

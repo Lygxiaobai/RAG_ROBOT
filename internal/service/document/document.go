@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"rag_robot/internal/pkg/metrics"
 	"rag_robot/internal/pkg/pool"
 	"strings"
 	"time"
@@ -49,6 +50,7 @@ func NewService(
 func (s *Service) ProcessDocument(ctx context.Context, file io.Reader, fileName string, fileSize int64, kbID int64) (*model.UploadDocumentResponse, error) {
 	fileType := getFileType(fileName)
 	if fileType == "" {
+		metrics.DocumentsProcessed.WithLabelValues("error").Inc()
 		return nil, fmt.Errorf("不支持的文件类型: %s", filepath.Ext(fileName))
 	}
 
@@ -122,11 +124,13 @@ func (s *Service) ProcessDocument(ctx context.Context, file io.Reader, fileName 
 	p, err := parser.GetParser(fileType)
 	if err != nil {
 		_ = s.docRepo.UpdateDocumentStatus(ctx, docID, "failed", 0)
+		metrics.DocumentsProcessed.WithLabelValues("error").Inc()
 		return nil, err
 	}
 	text, err := p.Parse(filePath)
 	if err != nil {
 		_ = s.docRepo.UpdateDocumentStatus(ctx, docID, "failed", 0)
+		metrics.DocumentsProcessed.WithLabelValues("error").Inc()
 		return nil, fmt.Errorf("解析文档失败: %w", err)
 	}
 	logger.Info("文档解析完成", zap.Int64("doc_id", docID), zap.Int("text_length", len(text)))
@@ -150,6 +154,7 @@ func (s *Service) ProcessDocument(ctx context.Context, file io.Reader, fileName 
 	embeddings, err := s.batchEmbedding(ctx, rawChunks)
 	if err != nil {
 		_ = s.docRepo.UpdateDocumentStatus(ctx, docID, "failed", 0)
+		metrics.DocumentsProcessed.WithLabelValues("error").Inc()
 		return nil, fmt.Errorf("向量化失败: %w", err)
 	}
 
@@ -165,6 +170,7 @@ func (s *Service) ProcessDocument(ctx context.Context, file io.Reader, fileName 
 
 	if err = s.docRepo.BatchCreateChunks(ctx, dbChunks); err != nil {
 		_ = s.docRepo.UpdateDocumentStatus(ctx, docID, "failed", 0)
+		metrics.DocumentsProcessed.WithLabelValues("error").Inc()
 		return nil, fmt.Errorf("保存分块失败: %w", err)
 	}
 
@@ -184,6 +190,7 @@ func (s *Service) ProcessDocument(ctx context.Context, file io.Reader, fileName 
 	}
 	if err = s.qdrantClient.UpsertPoints(ctx, qdrantPoints); err != nil {
 		_ = s.docRepo.UpdateDocumentStatus(ctx, docID, "failed", 0)
+		metrics.DocumentsProcessed.WithLabelValues("error").Inc()
 		return nil, fmt.Errorf("写入向量数据库失败: %w", err)
 	}
 	logger.Info("向量写入 Qdrant 完成", zap.Int64("doc_id", docID), zap.Int("point_count", len(qdrantPoints)))
@@ -198,6 +205,7 @@ func (s *Service) ProcessDocument(ctx context.Context, file io.Reader, fileName 
 
 	_ = s.docRepo.UpdateDocumentStatus(ctx, docID, "completed", len(dbChunks))
 	logger.Info("文档处理完成", zap.Int64("doc_id", docID))
+	metrics.DocumentsProcessed.WithLabelValues("success").Inc()
 
 	return &model.UploadDocumentResponse{
 		DocumentID: docID,

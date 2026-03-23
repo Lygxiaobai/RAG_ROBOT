@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 	"rag_robot/internal/model"
 	"rag_robot/internal/pkg/logger"
+	"rag_robot/internal/pkg/metrics"
 )
 
 // VectorCache 向量检索结果缓存
@@ -46,9 +47,11 @@ func (c *VectorCache) Get(ctx context.Context, kbID int64, query string, topK in
 
 	val, err := c.cache.Get(ctx, key)
 	if err == redis.Nil {
+		metrics.CacheHitsTotal.WithLabelValues("vector", "miss").Inc()
 		return nil, false, nil
 	}
 	if err != nil {
+		metrics.CacheHitsTotal.WithLabelValues("vector", "miss").Inc()
 		logger.Warn("获取向量缓存失败", zap.Error(err))
 		return nil, false, nil
 	}
@@ -57,9 +60,11 @@ func (c *VectorCache) Get(ctx context.Context, kbID int64, query string, topK in
 	if err = json.Unmarshal([]byte(val), &hits); err != nil {
 		logger.Warn("反序列化向量缓存失败", zap.Error(err))
 		_ = c.cache.Del(ctx, key)
+		metrics.CacheHitsTotal.WithLabelValues("vector", "miss").Inc()
 		return nil, false, nil
 	}
 
+	metrics.CacheHitsTotal.WithLabelValues("vector", "hit").Inc()
 	logger.Debug("向量缓存命中", zap.String("key", key), zap.Int("hit_count", len(hits)))
 	return hits, true, nil
 }

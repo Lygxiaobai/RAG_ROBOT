@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	pb "github.com/qdrant/go-client/qdrant"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"rag_robot/internal/pkg/circuitbreaker"
+	"rag_robot/internal/pkg/tracing"
 )
 
 const (
@@ -106,6 +109,10 @@ func (c *Client) UpsertPoints(ctx context.Context, points []*ChunkPoint) error {
 		return nil
 	}
 
+	ctx, span := tracing.Tracer.Start(ctx, "qdrant.UpsertPoints")
+	defer span.End()
+	span.SetAttributes(attribute.Int("qdrant.points_count", len(points)))
+
 	call := func() error {
 		pbPoints := make([]*pb.PointStruct, 0, len(points))
 		for _, p := range points {
@@ -139,9 +146,19 @@ func (c *Client) UpsertPoints(ctx context.Context, points []*ChunkPoint) error {
 	}
 
 	if c.breaker != nil {
-		return c.breaker.Call(call)
+		if err := c.breaker.Call(call); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return err
+		}
+		return nil
 	}
-	return call()
+	if err := call(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	return nil
 }
 
 // SearchResult 表示检索结果。
@@ -157,6 +174,13 @@ type SearchResult struct {
 
 // Search 执行 Top-K 相似度检索，并按 knowledge_base_id 过滤。
 func (c *Client) Search(ctx context.Context, vector []float32, kbID int64, topK uint64) ([]*SearchResult, error) {
+	ctx, span := tracing.Tracer.Start(ctx, "qdrant.Search")
+	defer span.End()
+	span.SetAttributes(
+		attribute.Int64("qdrant.kb_id", kbID),
+		attribute.Int64("qdrant.top_k", int64(topK)),
+	)
+
 	var results []*SearchResult
 
 	call := func() error {
@@ -204,13 +228,19 @@ func (c *Client) Search(ctx context.Context, vector []float32, kbID int64, topK 
 
 	if c.breaker != nil {
 		if err := c.breaker.Call(call); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return nil, err
 		}
+		span.SetAttributes(attribute.Int("qdrant.hits", len(results)))
 		return results, nil
 	}
 	if err := call(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
+	span.SetAttributes(attribute.Int("qdrant.hits", len(results)))
 	return results, nil
 }
 
@@ -246,3 +276,13 @@ func (c *Client) DeleteByDocumentID(ctx context.Context, documentID int64) error
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// Ping 检查 Qdrant 是否可达，用于健康检查。
+// 通过 List collections 接口探测连通性，有响应即视为正常。
+func (c *Client) Ping(ctx context.Context) error {
+	_, err := c.collections.List(ctx, &pb.ListCollectionsRequest{})
+	if err != nil {
+		return fmt.Errorf("qdrant ping 失败: %w", err)
+	}
+	return nil
+}

@@ -2,9 +2,9 @@ package handler
 
 import (
 	"fmt"
-	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"rag_robot/internal/pkg/errors"
 	"rag_robot/internal/service/chat"
 )
 
@@ -24,14 +24,11 @@ type createSessionRequest struct {
 func (h *ChatHandler) CreateSession(c *gin.Context) {
 	var req createSessionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "参数错误: " + err.Error()})
+		Fail(c, errors.ErrInvalidParam.Wrap(err))
 		return
 	}
 	sessionID := h.svc.CreateSession(req.KnowledgeBaseID)
-	c.JSON(http.StatusOK, gin.H{
-		"code": 200, "message": "success",
-		"data": gin.H{"session_id": sessionID},
-	})
+	Success(c, gin.H{"session_id": sessionID})
 }
 
 type chatRequest struct {
@@ -40,14 +37,17 @@ type chatRequest struct {
 }
 
 // Chat 多轮对话（SSE 流式响应）
+// 注意：SSE 一旦写入响应头就无法再走 JSON 错误响应，
+// 参数校验必须在写 SSE headers 之前完成。
 func (h *ChatHandler) Chat(c *gin.Context) {
 	var req chatRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "参数错误: " + err.Error()})
+		// 此时 headers 还未写出，可以正常返回 JSON 错误
+		Fail(c, errors.ErrInvalidParam.Wrap(err))
 		return
 	}
 
-	// 设置 SSE 响应头
+	// 设置 SSE 响应头（写完之后就不能再改状态码了）
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
@@ -63,6 +63,7 @@ func (h *ChatHandler) Chat(c *gin.Context) {
 	)
 
 	if err != nil {
+		// SSE 已开流，只能在流中发送错误事件，无法改 HTTP 状态码
 		fmt.Fprintf(c.Writer, "data: [ERROR] %s\n\n", err.Error())
 		c.Writer.Flush()
 		return
